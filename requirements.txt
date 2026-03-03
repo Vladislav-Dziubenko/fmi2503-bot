@@ -1,5 +1,6 @@
 python-telegram-bot
 requests
-beautifulsoup4
-flask
+beautifulsoup4==4.12.2
+flask==3.0.0
 gunicorn
+
