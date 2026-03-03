@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler
 from flask import Flask
 from threading import Thread
 
-# --- WEB SERVER ДЛЯ RENDER (держит сервис живым) ---
+# --- WEB SERVER ДЛЯ RENDER ---
 flask_app = Flask('')
 
 @flask_app.route('/')
@@ -35,6 +35,12 @@ COOLDOWN_SECONDS = 30
 _last_request = {}
 URL = "https://fmi.usm.md/orar/"
 
+# Настройки для обхода блокировок
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+# Отключаем использование системного прокси хостинга
+NO_PROXIES = {"http": None, "https": None}
 
 def _parse_links(soup):
     items = []
@@ -53,7 +59,8 @@ def _parse_links(soup):
 
 def get_short_schedule():
     try:
-        resp = requests.get(URL, timeout=10)
+        # Добавлены headers и proxies для фикса 403 Forbidden
+        resp = requests.get(URL, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
         resp.raise_for_status()
     except Exception as e:
         return f"Ошибка при загрузке: {e}"
@@ -70,7 +77,8 @@ def get_short_schedule():
 
 def fetch_schedule():
     try:
-        resp = requests.get(URL, timeout=10)
+        # Добавлены headers и proxies для фикса 403 Forbidden
+        resp = requests.get(URL, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
         resp.raise_for_status()
     except Exception as e:
         return f"Ошибка при загрузке сайта: {e}"
