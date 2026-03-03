@@ -8,20 +8,19 @@ from telegram.ext import Application, CommandHandler
 from flask import Flask
 from threading import Thread
 
-# --- БЛОК ДЛЯ RENDER (WEB SERVER) ---
-app = Flask('')
+# --- WEB SERVER ДЛЯ RENDER (держит сервис живым) ---
+flask_app = Flask('')
 
-@app.route('/')
+@flask_app.route('/')
 def home():
     return "Bot is alive!"
 
 def run_web():
-    # Render сам назначит порт через переменную окружения PORT
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    flask_app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
-    t = Thread(target=run_web)
+    t = Thread(target=run_web, daemon=True)
     t.start()
 # -------------------------------------
 
@@ -36,6 +35,7 @@ COOLDOWN_SECONDS = 30
 _last_request = {}
 URL = "https://fmi.usm.md/orar/"
 
+
 def _parse_links(soup):
     items = []
     seen = set()
@@ -49,6 +49,7 @@ def _parse_links(soup):
                 seen.add(href)
                 items.append((text[:80], href))
     return items
+
 
 def get_short_schedule():
     try:
@@ -66,6 +67,7 @@ def get_short_schedule():
     lines.append("\nСайт: https://fmi.usm.md/orar/")
     return "\n".join(lines)
 
+
 def fetch_schedule():
     try:
         resp = requests.get(URL, timeout=10)
@@ -82,6 +84,7 @@ def fetch_schedule():
     result.append("\nСайт: https://fmi.usm.md/orar/")
     return "\n".join(result)
 
+
 def _check_cooldown(user_id, chat_id):
     key = (user_id, chat_id)
     now = time.time()
@@ -92,6 +95,7 @@ def _check_cooldown(user_id, chat_id):
     _last_request[key] = now
     return None
 
+
 async def start(update, context):
     await update.message.reply_text(
         "Привет! Я бот с расписанием FMI USM.\n\n"
@@ -99,6 +103,7 @@ async def start(update, context):
         "/raspisanie — основное расписание\n"
         "/orar — полное расписание с сайта"
     )
+
 
 async def raspisanie(update, context):
     user_id = update.effective_user.id
@@ -109,6 +114,7 @@ async def raspisanie(update, context):
         return
     text = get_short_schedule()
     await update.message.reply_text(text)
+
 
 async def orar(update, context):
     user_id = update.effective_user.id
@@ -123,17 +129,18 @@ async def orar(update, context):
         text = text[:4000] + "\n\n... (обрезано)"
     await update.message.reply_text(text)
 
+
 def main():
-    # Запускаем фоновый веб-сервер для Render
     keep_alive()
-    
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("raspisanie", raspisanie))
-    app.add_handler(CommandHandler("orar", orar))
-    
-    print("Бот запущен...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    bot_app = Application.builder().token(TOKEN).build()
+    bot_app.add_handler(CommandHandler("start", start))
+    bot_app.add_handler(CommandHandler("raspisanie", raspisanie))
+    bot_app.add_handler(CommandHandler("orar", orar))
+
+    logger.info("Бот запущен...")
+    bot_app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
