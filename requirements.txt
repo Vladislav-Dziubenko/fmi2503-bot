@@ -1,5 +1,5 @@
-python-telegram-bot==20.7
-requests==2.31.0
-beautifulsoup4==4.12.3
-flask==3.0.0
-gunicorn==21.2.0
+python-telegram-bot
+requests
+beautifulsoup4
+flask
+gunicorn
