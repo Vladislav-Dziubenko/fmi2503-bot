@@ -1,7 +1,8 @@
-python-telegram-bot --upgrade
+python-telegram-bot
 requests
 beautifulsoup4==4.12.2
 flask==3.0.0
 gunicorn
+
 
 
