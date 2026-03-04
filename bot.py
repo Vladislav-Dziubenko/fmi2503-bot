@@ -35,11 +35,9 @@ COOLDOWN_SECONDS = 30
 _last_request = {}
 URL = "https://fmi.usm.md/orar/"
 
-# Настройки для обхода блокировок
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 }
-# Отключаем использование системного прокси хостинга
 NO_PROXIES = {"http": None, "https": None}
 
 def _parse_links(soup):
@@ -56,10 +54,14 @@ def _parse_links(soup):
                 items.append((text[:80], href))
     return items
 
+def format_as_expandable(title, items):
+    """Форматирует список в сворачиваемую цитату HTML"""
+    # Заголовок жирным, список внутри сворачиваемой цитаты
+    content = "\n".join([f"• {text}\n  {href}" for text, href in items])
+    return f"<b>{title}</b>\n\n<blockquote expandable>{content}</blockquote>\n\n<a href='{URL}'>Сайт факультета</a>"
 
 def get_short_schedule():
     try:
-        # Добавлены headers и proxies для фикса 403 Forbidden
         resp = requests.get(URL, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
         resp.raise_for_status()
     except Exception as e:
@@ -67,17 +69,11 @@ def get_short_schedule():
     soup = BeautifulSoup(resp.text, "html.parser")
     items = _parse_links(soup)
     if not items:
-        return "Расписание не найдено. Сайт: https://fmi.usm.md/orar/"
-    lines = ["Расписание FMI USM (с сайта)\n"]
-    for text, href in items[:25]:
-        lines.append(f"• {text}\n  {href}")
-    lines.append("\nСайт: https://fmi.usm.md/orar/")
-    return "\n".join(lines)
-
+        return "Расписание не найдено."
+    return format_as_expandable("Расписание FMI USM (кратко)", items[:15])
 
 def fetch_schedule():
     try:
-        # Добавлены headers и proxies для фикса 403 Forbidden
         resp = requests.get(URL, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
         resp.raise_for_status()
     except Exception as e:
@@ -85,13 +81,8 @@ def fetch_schedule():
     soup = BeautifulSoup(resp.text, "html.parser")
     items = _parse_links(soup)
     if not items:
-        return "Расписание не найдено. https://fmi.usm.md/orar/"
-    result = ["Расписание FMI USM (полное)\n"]
-    for text, href in items:
-        result.append(f"• {text}\n  {href}")
-    result.append("\nСайт: https://fmi.usm.md/orar/")
-    return "\n".join(result)
-
+        return "Расписание не найдено."
+    return format_as_expandable("Расписание FMI USM (полное)", items)
 
 def _check_cooldown(user_id, chat_id):
     key = (user_id, chat_id)
@@ -99,19 +90,17 @@ def _check_cooldown(user_id, chat_id):
     last = _last_request.get(key, 0)
     if now - last < COOLDOWN_SECONDS:
         left = int(COOLDOWN_SECONDS - (now - last))
-        return f"Подожди {left} сек перед следующим запросом."
+        return f"Подожди {left} сек."
     _last_request[key] = now
     return None
-
 
 async def start(update, context):
     await update.message.reply_text(
         "Привет! Я бот с расписанием FMI USM.\n\n"
         "Команды:\n"
-        "/raspisanie — основное расписание\n"
-        "/orar — полное расписание с сайта"
+        "/raspisanie — краткий список\n"
+        "/orar — полный список (свернут)"
     )
-
 
 async def raspisanie(update, context):
     user_id = update.effective_user.id
@@ -121,8 +110,8 @@ async def raspisanie(update, context):
         await update.message.reply_text(msg)
         return
     text = get_short_schedule()
-    await update.message.reply_text(text)
-
+    # parse_mode='HTML' критически важен!
+    await update.message.reply_html(text)
 
 async def orar(update, context):
     user_id = update.effective_user.id
@@ -131,16 +120,16 @@ async def orar(update, context):
     if msg:
         await update.message.reply_text(msg)
         return
-    await update.message.reply_text("Загружаю с сайта...")
+    status_msg = await update.message.reply_text("Загружаю с сайта...")
     text = fetch_schedule()
     if len(text) > 4000:
-        text = text[:4000] + "\n\n... (обрезано)"
-    await update.message.reply_text(text)
-
+        text = text[:3800] + "</blockquote>\n\n(Обрезано из-за лимита)"
+    
+    await status_msg.delete() # Удаляем "Загружаю..."
+    await update.message.reply_html(text)
 
 def main():
     keep_alive()
-
     bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("raspisanie", raspisanie))
@@ -149,6 +138,6 @@ def main():
     logger.info("Бот запущен...")
     bot_app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
-
 if __name__ == "__main__":
     main()
+
