@@ -1,113 +1,156 @@
-import os
-import time
 import logging
-import requests
-from bs4 import BeautifulSoup
-from telegram import Update
-from telegram.ext import Application, CommandHandler
-from flask import Flask
+import os
+import random
+import time
 from threading import Thread
 
-# --- НАСТРОЙКИ ---
-TOKEN = os.environ.get("BOT_TOKEN", "СЮДА_ВСТАВЬ_ТОКЕН")
-URL = "https://fmi.usm.md"
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
-NO_PROXIES = {"http": None, "https": None}
+from flask import Flask
+from telegram import Message, Update
+from telegram.ext import Application, CommandHandler
+from telegram.error import TelegramError
 
-# Кэш для хранения расписания (чтобы не перегружать сайт и хостинг)
-cached_data = {
-    "short": "⏳ Загружаю данные, подождите немного...",
-    "full": "⏳ Загружаю данные, подождите немного...",
-    "last_upd": 0
-}
+from schedule import cached_data, get_smart_report, get_status_text, update_cache_loop
 
-# --- WEB SERVER ДЛЯ RENDER ---
-flask_app = Flask('')
+flask_app = Flask("")
 
-@flask_app.route('/')
+@flask_app.route("/")
 def home():
     return "Bot is alive!"
 
-def run_web():
+def run_web() -> None:
     port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+    flask_app.run(host="0.0.0.0", port=port)
 
-# --- ЛОГИКА ПАРСИНГА ---
-def _parse_links():
-    try:
-        resp = requests.get(URL, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        items = []
-        seen = set()
-        for link in soup.find_all("a", href=True):
-            href = link.get("href", "").strip()
-            text = link.get_text(strip=True) or ""
-            if not href or len(text) < 3: continue
-            if any(x in href.lower() for x in ["orar", ".pdf", "docs.google", "spreadsheets"]):
-                if href not in seen:
-                    seen.add(href)
-                    items.append((text[:80], href))
-        return items
-    except Exception as e:
-        logging.error(f"Ошибка парсинга: {e}")
-        return None
+def keep_alive() -> None:
+    Thread(target=run_web, daemon=True).start()
 
-def update_cache_loop():
-    """Фоновая задача: обновляет данные раз в 30 минут"""
-    while True:
-        items = _parse_links()
-        if items:
-            # Формируем краткое
-            short_content = "\n".join([f"• {t}\n  {h}" for t, h in items[:15]])
-            cached_data["short"] = f"<b>📍 Краткое расписание</b>\n\n<blockquote expandable>{short_content}</blockquote>"
-            
-            # Формируем полное
-            full_content = "\n".join([f"• {t}\n  {h}" for t, h in items])
-            if len(full_content) > 3800: full_content = full_content[:3800] + "\n...(обрезано)"
-            cached_data["full"] = f"<b>📚 Полный список ссылок</b>\n\n<blockquote expandable>{full_content}</blockquote>"
-            
-            cached_data["last_upd"] = time.strftime("%H:%M:%S")
-            logging.info(f"Кэш обновлен в {cached_data['last_upd']}")
-        
-        time.sleep(1800) # 30 минут
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# --- ОБРАБОТЧИКИ ТЕЛЕГРАМ ---
-async def start(update, context):
-    await update.message.reply_text(
+TOKEN = os.environ.get("BOT_TOKEN")
+COOLDOWN_MIN = 30
+COOLDOWN_MAX = 45
+
+_user_cooldowns: dict[int, dict] = {}
+_bot_messages: dict[int, list[int]] = {}
+MAX_TRACKED_MESSAGES = 100
+
+def _track_message(chat_id: int, message_id: int) -> None:
+    ids = _bot_messages.setdefault(chat_id, [])
+    ids.append(message_id)
+    if len(ids) > MAX_TRACKED_MESSAGES:
+        _bot_messages[chat_id] = ids[-MAX_TRACKED_MESSAGES:]
+
+async def _reply_text(update: Update, text: str, **kwargs) -> Message:
+    msg = await update.message.reply_text(text, **kwargs)
+    _track_message(update.effective_chat.id, msg.message_id)
+    return msg
+
+async def _reply_html(update: Update, text: str, **kwargs) -> Message:
+    msg = await update.message.reply_html(text, **kwargs)
+    _track_message(update.effective_chat.id, msg.message_id)
+    return msg
+
+def check_cooldown(user_id: int) -> str | None:
+    now = time.time()
+    data = _user_cooldowns.get(user_id)
+    if data:
+        elapsed = now - data["last"]
+        if elapsed < data["required"]:
+            left = int(data["required"] - elapsed) + 1
+            return f"⏳ Подождите {left} сек перед следующей командой."
+    _user_cooldowns[user_id] = {
+        "last": now,
+        "required": random.randint(COOLDOWN_MIN, COOLDOWN_MAX),
+    }
+    return None
+
+async def _reply_cooldown(update: Update) -> bool:
+    user_id = update.effective_user.id
+    msg = check_cooldown(user_id)
+    if msg:
+        sent = await update.message.reply_text(msg)
+        _track_message(update.effective_chat.id, sent.message_id)
+        return True
+    return False
+
+async def start(update: Update, context) -> None:
+    await _reply_text(
+        update,
         "👋 Привет! Я бот расписания FMI USM.\n\n"
         "Команды:\n"
-        "/raspisanie — список последних обновлений\n"
-        "/orar — все ссылки с сайта\n\n"
-        "Данные обновляются автоматически раз в 30 минут."
+        "/raspisanie — краткий список ссылок\n"
+        "/orar — полный список с сайта\n"
+        "/smart — умный анализ ключевых дат (локально)\n"
+        "/ai — то же, что /smart\n"
+        "/status — статус обновления данных\n"
+        "/clear — удалить сообщения бота в этом чате\n\n"
+        "Данные обновляются автоматически раз в 30 минут.\n"
+        "Между командами — пауза 30–45 сек.",
     )
 
-async def raspisanie(update, context):
-    await update.message.reply_html(f"{cached_data['short']}\n\n🕒 Обновлено: {cached_data['last_upd']}")
+async def raspisanie(update: Update, context) -> None:
+    if await _reply_cooldown(update):
+        return
+    await _reply_html(
+        update,
+        f"{cached_data['short']}\n\n🕒 Обновлено: {cached_data['last_upd']}",
+    )
 
-async def orar(update, context):
-    await update.message.reply_html(f"{cached_data['full']}\n\n🕒 Обновлено: {cached_data['last_upd']}")
+async def orar(update: Update, context) -> None:
+    if await _reply_cooldown(update):
+        return
+    await _reply_html(
+        update,
+        f"{cached_data['full']}\n\n🕒 Обновлено: {cached_data['last_upd']}",
+    )
 
-# --- ЗАПУСК ---
-logging.basicConfig(level=logging.INFO)
+async def smart(update: Update, context) -> None:
+    if await _reply_cooldown(update):
+        return
+    await _reply_html(update, get_smart_report())
 
-def main():
-    # 1. Запуск веб-сервера (для Render)
-    Thread(target=run_web, daemon=True).start()
-    
-    # 2. Запуск фонового обновления данных
+async def status(update: Update, context) -> None:
+    if await _reply_cooldown(update):
+        return
+    await _reply_html(update, get_status_text())
+
+async def clear_chat(update: Update, context) -> None:
+    chat_id = update.effective_chat.id
+    ids = list(_bot_messages.get(chat_id, []))
+    _bot_messages[chat_id] = []
+    deleted = 0
+    skipped = 0
+    for message_id in ids:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted += 1
+        except TelegramError:
+            skipped += 1
+    note = ""
+    if skipped:
+        note = f"\n\n⚠️ {skipped} сообщ. не удалены (старше 48 ч или уже удалены)."
+    await _reply_text(update, f"🧹 Удалено сообщений бота: {deleted}.{note}")
+
+def main() -> None:
+    if not TOKEN:
+        logger.error("BOT_TOKEN не задан в переменных окружения!")
+        raise SystemExit(1)
+    keep_alive()
     Thread(target=update_cache_loop, daemon=True).start()
-
-    # 3. Запуск бота
     bot_app = Application.builder().token(TOKEN).build()
     bot_app.add_handler(CommandHandler("start", start))
     bot_app.add_handler(CommandHandler("raspisanie", raspisanie))
     bot_app.add_handler(CommandHandler("orar", orar))
-
-    logging.info("Бот запущен...")
-    bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    bot_app.add_handler(CommandHandler("smart", smart))
+    bot_app.add_handler(CommandHandler("ai", smart))
+    bot_app.add_handler(CommandHandler("status", status))
+    bot_app.add_handler(CommandHandler("clear", clear_chat))
+    logger.info("Бот запущен...")
+    bot_app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
