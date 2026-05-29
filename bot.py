@@ -2,6 +2,7 @@ import logging
 import os
 import random
 import time
+import asyncio
 from threading import Thread
  
 from flask import Flask, request
@@ -23,6 +24,7 @@ _bot_messages = {}
 MAX_TRACKED_MESSAGES = 100
  
 _app: Application = None
+_loop: asyncio.AbstractEventLoop = None
  
 @flask_app.route("/")
 def home():
@@ -30,12 +32,12 @@ def home():
  
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-    global _app
-    if _app is None:
+    global _app, _loop
+    if _app is None or _loop is None:
         return "not ready", 503
     json_data = request.get_json(force=True)
     update = Update.de_json(json_data, _app.bot)
-    _app.update_queue.put_nowait(update)
+    asyncio.run_coroutine_threadsafe(_app.process_update(update), _loop)
     return "ok", 200
  
 def _track_message(chat_id, message_id):
@@ -119,13 +121,21 @@ async def clear_chat(update, context):
     note = f"\n\n⚠️ {skipped} не удалены (лимит Telegram 48ч)." if skipped else ""
     await _reply_text(update, f"🧹 Удалено: {deleted}.{note}")
  
-async def setup_webhook(app: Application):
-    url = f"{WEBHOOK_URL}/webhook"
-    await app.bot.set_webhook(url=url)
-    logger.info("Webhook установлен: %s", url)
+def run_bot_loop(app, loop):
+    async def _run():
+        await app.initialize()
+        await app.bot.set_webhook(f"{WEBHOOK_URL}/webhook")
+        logger.info("Webhook установлен: %s/webhook", WEBHOOK_URL)
+        await app.start()
+        logger.info("Бот запущен в режиме Webhook.")
+        # держим loop живым
+        while True:
+            await asyncio.sleep(3600)
+ 
+    loop.run_until_complete(_run())
  
 def main():
-    global _app
+    global _app, _loop
  
     if not TOKEN:
         logger.error("BOT_TOKEN не задан!")
@@ -145,20 +155,15 @@ def main():
                     ("smart", smart), ("ai", smart), ("status", status), ("clear", clear_chat)]:
         app.add_handler(CommandHandler(cmd, fn))
  
-    import asyncio
- 
-    async def run_app():
-        await app.initialize()
-        await setup_webhook(app)
-        await app.start()
-        logger.info("Бот запущен в режиме Webhook.")
- 
     loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_app())
-    Thread(target=loop.run_forever, daemon=True).start()
+    _loop = loop
  
-    # Исправлено: порт 10000 для Render
+    # Запускаем бота в отдельном потоке
+    Thread(target=run_bot_loop, args=(app, loop), daemon=True).start()
+ 
+    # Даём боту секунду на старт
+    time.sleep(2)
+ 
     port = int(os.environ.get("PORT", 10000))
     logger.info("Flask запущен на порту %d", port)
     flask_app.run(host="0.0.0.0", port=port)
