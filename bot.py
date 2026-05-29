@@ -8,6 +8,8 @@ from flask import Flask
 from telegram import Message, Update
 from telegram.ext import Application, CommandHandler
 from telegram.error import TelegramError
+# Импортируем HTTPXRequest для настройки таймаутов
+from telegram.request import HTTPXRequest
 
 from schedule import (
     get_orar_text,
@@ -121,12 +123,20 @@ def main():
     if not TOKEN:
         logger.error("BOT_TOKEN не задан!")
         raise SystemExit(1)
+    
     keep_alive()
     Thread(target=update_cache_loop, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
+    
+    # Настраиваем увеличенные таймауты подключения (по 30 секунд вместо дефолтных 5)
+    request_config = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+    
+    # Инициализируем бота с новыми настройками таймаута
+    app = Application.builder().token(TOKEN).request(request_config).build()
+    
     for cmd, fn in [("start", start), ("raspisanie", raspisanie), ("orar", orar),
                     ("smart", smart), ("ai", smart), ("status", status), ("clear", clear_chat)]:
         app.add_handler(CommandHandler(cmd, fn))
+        
     logger.info("Бот запущен...")
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
