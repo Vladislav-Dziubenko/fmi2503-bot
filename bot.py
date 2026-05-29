@@ -4,11 +4,10 @@ import random
 import time
 from threading import Thread
 
-from flask import Flask
+from flask import Flask, request as flask_request
 from telegram import Message, Update
 from telegram.ext import Application, CommandHandler
 from telegram.error import TelegramError
-# Импортируем HTTPXRequest для настройки таймаутов
 from telegram.request import HTTPXRequest
 
 from schedule import (
@@ -22,25 +21,42 @@ from schedule import (
 
 flask_app = Flask("")
 
-@flask_app.route("/")
-def home():
-    return "Bot is alive!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    Thread(target=run_web, daemon=True).start()
-
 logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN")
+# Динамически получаем адрес вашего пространства на Hugging Face
+SPACE_ID = os.environ.get("SPACE_ID") 
+WEBHOOK_URL = f"https://{SPACE_ID.replace('/', '-')}.hf.space/webhook" if SPACE_ID else None
+
 COOLDOWN_MIN, COOLDOWN_MAX = 30, 45
 _user_cooldowns = {}
 _bot_messages = {}
 MAX_TRACKED_MESSAGES = 100
+
+# Создаем глобальный объект приложения бота
+request_config = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+app = Application.builder().token(TOKEN).request(request_config).build()
+
+@flask_app.route("/")
+def home():
+    return "Bot is alive!"
+
+# Вебхук-обработчик для приема сообщений от Telegram
+@flask_app.route("/webhook", methods=["POST"])
+async def webhook():
+    if flask_request.method == "POST":
+        try:
+            json_string = flask_request.get_json(force=True)
+            update = Update.de_json(json_string, app.bot)
+            await app.process_update(update)
+        except Exception as e:
+            logger.error(f"Ошибка обработки вебхука: {e}")
+    return "OK"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host="0.0.0.0", port=port)
 
 def _track_message(chat_id, message_id):
     ids = _bot_messages.setdefault(chat_id, [])
@@ -124,21 +140,33 @@ def main():
         logger.error("BOT_TOKEN не задан!")
         raise SystemExit(1)
     
-    keep_alive()
     Thread(target=update_cache_loop, daemon=True).start()
-    
-    # Настраиваем увеличенные таймауты подключения (по 30 секунд вместо дефолтных 5)
-    request_config = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
-    
-    # Инициализируем бота с новыми настройками таймаута
-    app = Application.builder().token(TOKEN).request(request_config).build()
     
     for cmd, fn in [("start", start), ("raspisanie", raspisanie), ("orar", orar),
                     ("smart", smart), ("ai", smart), ("status", status), ("clear", clear_chat)]:
         app.add_handler(CommandHandler(cmd, fn))
         
-    logger.info("Бот запущен...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Инициализируем бота внутри Flask-приложения
+    with flask_app.app_context():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Настраиваем вебхук в Telegram
+        if WEBHOOK_URL:
+            logger.info(f"Установка вебхука на адрес: {WEBHOOK_URL}")
+            try:
+                loop.run_until_complete(app.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES))
+            except Exception as e:
+                logger.error(f"Не удалось установить вебхук: {e}")
+        
+        loop.run_until_complete(app.initialize())
+        if app.updater:
+            loop.run_until_complete(app.updater.initialize())
+        loop.run_until_complete(app.start())
+
+    logger.info("Бот запущен через вебхуки...")
+    run_web()
 
 if __name__ == "__main__":
     main()
