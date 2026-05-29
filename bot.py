@@ -5,19 +5,9 @@ import time
 from threading import Thread
  
 from flask import Flask
-from telegram import Message, Update
+from telegram import Update
 from telegram.ext import Application, CommandHandler
 from telegram.error import TelegramError
-from telegram.request import HTTPXRequest
- 
-from schedule import (
-    get_orar_text,
-    get_raspisanie_text,
-    get_smart_report,
-    get_status_text,
-    refresh_on_request,
-    update_cache_loop,
-)
  
 flask_app = Flask("")
  
@@ -85,21 +75,25 @@ async def start(update, context):
  
 async def raspisanie(update, context):
     if await _reply_cooldown(update): return
+    from schedule import get_raspisanie_text
     body, footer = get_raspisanie_text()
     await _reply_html(update, f"{body}\n\n{footer}")
  
 async def orar(update, context):
     if await _reply_cooldown(update): return
+    from schedule import get_orar_text
     body, footer = get_orar_text()
     await _reply_html(update, f"{body}\n\n{footer}")
  
 async def smart(update, context):
     if await _reply_cooldown(update): return
+    from schedule import refresh_on_request, get_smart_report
     footer = refresh_on_request()
     await _reply_html(update, f"{get_smart_report()}\n\n{footer}")
  
 async def status(update, context):
     if await _reply_cooldown(update): return
+    from schedule import get_status_text
     await _reply_html(update, get_status_text())
  
 async def clear_chat(update, context):
@@ -120,31 +114,26 @@ def main():
     if not TOKEN:
         logger.error("BOT_TOKEN не задан!")
         raise SystemExit(1)
-    
-    # 1. Запуск Flask в фоновом потоке
+ 
+    from schedule import update_cache_loop
+ 
+    # 1. Flask в фоне
     Thread(target=run_web, daemon=True).start()
     logger.info("Фоновый веб-сервер Flask успешно запущен.")
-    
-    # 2. Запуск цикла обновления кэша
+ 
+    # 2. Кэш в фоне
     Thread(target=update_cache_loop, daemon=True).start()
-    
-    # 3. Настройка сетевого клиента — исправлено proxy_url -> proxy
-    request_config = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        proxy="http://194.233.68.22:443"
-    )
-    
-    # 4. Сборка приложения
-    app = Application.builder().token(TOKEN).request(request_config).build()
-    
+ 
+    # 3. Приложение БЕЗ прокси (Hugging Face не блокирует Telegram)
+    app = Application.builder().token(TOKEN).build()
+ 
     for cmd, fn in [("start", start), ("raspisanie", raspisanie), ("orar", orar),
                     ("smart", smart), ("ai", smart), ("status", status), ("clear", clear_chat)]:
         app.add_handler(CommandHandler(cmd, fn))
-        
+ 
     logger.info("Бот запущен. Polling...")
-    
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
  
 if __name__ == "__main__":
     main()
+ 
