@@ -4,7 +4,6 @@
 """
 import re
 from datetime import date, timedelta
-from typing import dict, list
 
 # Словарь дисциплин и их синонимов
 SUBJECT_KEYWORDS = {
