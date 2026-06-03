@@ -31,9 +31,11 @@ class SmartAnalyzer:
             if categories:
                 important_links.append({"title": text, "href": href, "categories": categories})
             for parsed in self._extract_dates(combined, today):
+                # Вычисляем дни ВСЕГДА от текущей даты (today), что решает путаницу с годами
+                days_until = (parsed - today).days
                 events.append({
                     "date": parsed, "title": text[:60], "href": href,
-                    "categories": categories, "days_until": (parsed - today).days,
+                    "categories": categories, "days_until": days_until,
                 })
         events.sort(key=lambda e: e["date"])
         upcoming = [e for e in events if e["days_until"] >= 0][:10]
@@ -77,43 +79,70 @@ class SmartAnalyzer:
             (r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", self._parse_ymd),
             (r"\b(\d{1,2})\.(\d{1,2})\.(\d{2})\b", self._parse_dmy_short),
             (r"\b(\d{1,2})\s+(ianuarie|februarie|martie|aprilie|mai|iunie|iulie|"
-             r"august|septembrie|octombrie|noiembrie|decembrie)(?:\s+(\d{4}))?\b", self._parse_romanian),
-            (r"\b(\d{1,2})\.(\d{1,2})\b", self._parse_dm),
+             r"august|septembrie|octombrie|noiembrie|decembrie)(?:\s+(\d{4}))?\b", 
+             lambda m: self._parse_romanian(m, today)),
+            (r"\b(\d{1,2})\.(\d{1,2})\b", lambda m: self._parse_dm(m, today)),
         ]
         for pattern, parser in patterns:
             for match in re.finditer(pattern, text, re.IGNORECASE):
-                parsed = parser(match, today)
+                parsed = parser(match)
                 if parsed and parsed not in seen:
                     seen.add(parsed)
                     found.append(parsed)
         return found
 
-    def _parse_dmy(self, m, _): 
-        try: return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except ValueError: return None
-    def _parse_dmy_short(self, m, _):
-        try: return date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except ValueError: return None
-    def _parse_ymd(self, m, _):
-        try: return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError: return None
+    def _parse_dmy(self, m): 
+        """Парсит формат ДД.МММ.ГГГГ"""
+        try: 
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError: 
+            return None
+    
+    def _parse_dmy_short(self, m):
+        """Парсит формат ДД.МММ.ГГ (2-значный год)"""
+        try: 
+            return date(2000 + int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError: 
+            return None
+    
+    def _parse_ymd(self, m):
+        """Парсит формат ГГГГ-МММ-ДД"""
+        try: 
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError: 
+            return None
+    
     def _parse_romanian(self, m, today):
+        """Парсит румынские месяцы. Если год не указан, проверяет текущий год,
+        если дата в прошлом - берёт следующий год."""
         month = ROMANIAN_MONTHS.get(m.group(2).lower())
-        if not month: return None
+        if not month: 
+            return None
         day = int(m.group(1))
+        # Если год явно указан в тексте - используем его
+        # Иначе берём текущий год, и если дата уже прошла - переходим на следующий
         year = int(m.group(3)) if m.group(3) else today.year
         try:
             parsed = date(year, month, day)
-            if not m.group(3) and parsed < today: parsed = date(year + 1, month, day)
+            # Если год не был указан и дата уже прошла - добавляем год
+            if not m.group(3) and parsed < today:
+                parsed = date(year + 1, month, day)
             return parsed
-        except ValueError: return None
+        except ValueError: 
+            return None
+    
     def _parse_dm(self, m, today):
+        """Парсит формат ДД.МММ (без года). 
+        Берёт текущий год, если дата в прошлом - берёт следующий год."""
         try:
             day, month = int(m.group(1)), int(m.group(2))
             parsed = date(today.year, month, day)
-            if parsed < today - timedelta(days=30): parsed = date(today.year + 1, month, day)
+            # Если дата давно прошла (более 30 дней назад), берём следующий год
+            if parsed < today - timedelta(days=30):
+                parsed = date(today.year + 1, month, day)
             return parsed
-        except ValueError: return None
+        except ValueError: 
+            return None
 
     def _build_recommendations(self, upcoming, important_links, today):
         recs = []

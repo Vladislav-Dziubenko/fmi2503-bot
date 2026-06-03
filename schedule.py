@@ -34,6 +34,7 @@ HEADERS = {
 NO_PROXIES = {"http": None, "https": None}
 CACHE_REFRESH_SECONDS = 1800
 SHORT_LIMIT = 15
+REQUEST_TIMEOUT = 10  # Жёсткий timeout для всех запросов
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_snapshot.json")
 
 _cache_lock = Lock()
@@ -74,7 +75,11 @@ def _normalize_href(href: str, base_url: str) -> str:
     return href
 
 def _parse_links_from_page(url: str) -> list[tuple[str, str]]:
-    resp = requests.get(url, headers=HEADERS, proxies=NO_PROXIES, timeout=15)
+    """
+    Парсит ссылки со страницы с жёстким timeout=10 секунд.
+    Если сайт не отвечает за 10 секунд - выбросит исключение.
+    """
+    resp = requests.get(url, headers=HEADERS, proxies=NO_PROXIES, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
     items: list[tuple[str, str]] = []
@@ -92,6 +97,11 @@ def _parse_links_from_page(url: str) -> list[tuple[str, str]]:
     return items
 
 def fetch_all_items() -> tuple[list[tuple[str, str]], Optional[str]]:
+    """
+    Попытается загрузить ссылки со всех сайтов.
+    Если сайт не отвечает за REQUEST_TIMEOUT секунд - переходит к следующему.
+    Если ничего не загрузилось - отдаёт ошибку.
+    """
     all_items: list[tuple[str, str]] = []
     seen: set[str] = set()
     errors: list[str] = []
@@ -102,6 +112,12 @@ def fetch_all_items() -> tuple[list[tuple[str, str]], Optional[str]]:
                 if href not in seen:
                     seen.add(href)
                     all_items.append((text, href))
+        except requests.Timeout:
+            logger.error("Timeout при парсинге %s (>%d сек)", url, REQUEST_TIMEOUT)
+            errors.append(f"{url}: timeout (>{REQUEST_TIMEOUT}s)")
+        except requests.ConnectionError as exc:
+            logger.error("Ошибка соединения %s: %s", url, exc)
+            errors.append(f"{url}: connection error")
         except Exception as exc:
             logger.error("Ошибка парсинга %s: %s", url, exc)
             errors.append(f"{url}: {exc}")
@@ -219,12 +235,25 @@ def refresh_on_request() -> str:
         return "❌ Нет сохранённых данных. Попробуйте позже."
 
 def update_cache_loop() -> None:
+    """
+    Главный цикл обновления кэша. Обёрнут в try-except, чтобы 
+    бот не падал при критических ошибках парсинга.
+    """
     _load_disk_cache()
-    update_cache()
+    
+    try:
+        update_cache()
+    except Exception as exc:
+        logger.exception("Критическая ошибка при инициализации кэша: %s", exc)
+    
     while True:
         time.sleep(CACHE_REFRESH_SECONDS)
-        with _cache_lock:
-            update_cache()
+        try:
+            with _cache_lock:
+                update_cache()
+        except Exception as exc:
+            logger.exception("Критическая ошибка в цикле обновления кэша: %s", exc)
+            # Продолжаем работу, перейдём к следующему циклу
 
 def get_raspisanie_text() -> tuple[str, str]:
     footer = refresh_on_request()
