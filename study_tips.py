@@ -146,6 +146,9 @@ class StudyCoach:
         lines = ["<b>🎓 Умный учебный помощник</b>", ""]
         
         study_plan = analysis.get("study_plan", [])
+        subjects = analysis.get("subjects", {})
+        
+        # Если есть план подготовки - выводим его
         if study_plan:
             lines.append("<b>📖 План подготовки:</b>")
             for item in study_plan:
@@ -164,15 +167,15 @@ class StudyCoach:
                     f"{emoji} <b>{subject}</b> {date_str}\n"
                     f"   ⏰ {when}{tip_text}"
                 )
-        else:
-            lines.append(bq("📚 Явных экзаменов не найдено. Хорошего семестра!"))
-        
-        subjects = analysis.get("subjects", {})
-        if subjects:
             lines.append("")
-            lines.append("<b>📚 Обнаруженные предметы:</b>")
+        
+        # Если есть обнаруженные предметы - выводим их
+        if subjects:
+            lines.append("<b>📚 Обнаруженные предметы в расписании:</b>")
             for subject, count in sorted(subjects.items(), key=lambda x: -x[1])[:6]:
                 lines.append(f"• {esc(subject)}: {count} ссылок")
+        else:
+            lines.append(bq("📚 Явных данных о предметах не найдено."))
         
         return "\n".join(lines)
     
