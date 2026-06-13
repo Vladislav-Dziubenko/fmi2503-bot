@@ -86,6 +86,13 @@ def _parse_links_from_page(url: str) -> list[tuple[str, str]]:
     resp = requests.get(url, headers=HEADERS, proxies=NO_PROXIES, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
+
+    # ВРЕМЕННЫЙ ЛОГ - удалить после отладки
+    all_links = soup.find_all("a", href=True)
+    logger.info("URL: %s | Всего <a>: %d | HTML длина: %d", url, len(all_links), len(resp.text))
+    for link in all_links[:20]:
+        logger.info("  LINK: %s | TEXT: %s", link.get("href", ""), link.get_text(strip=True)[:40])
+
     items: list[tuple[str, str]] = []
     seen: set[str] = set()
     for link in soup.find_all("a", href=True):
