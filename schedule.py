@@ -1,5 +1,7 @@
+edule · PY
 """
-Парсер расписания с fmi.usm.md, кэш и сохранение последних данных.
+Парсер расписания с fmi.usm.md через WordPress sitemap.
+Кэш и сохранение последних данных.
 При недоступности сайта отдаётся последнее успешное сохранение.
 """
 import html
@@ -11,19 +13,19 @@ from copy import deepcopy
 from threading import Lock
 from typing import Optional
 from urllib.parse import urljoin
-
+ 
 import requests
 from bs4 import BeautifulSoup
-
+ 
 from analyzer import SmartAnalyzer
-
+ 
 logger = logging.getLogger(__name__)
-
-URLS = [
-    "https://fmi.usm.md",
-    "https://fmi.usm.md/orar/",
+ 
+SITEMAP_URLS = [
+    "https://fmi.usm.md/page-sitemap1.xml",
+    "https://fmi.usm.md/post-sitemap1.xml",
 ]
-
+ 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,16 +36,16 @@ HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
 }
-
+ 
 NO_PROXIES = {"http": None, "https": None}
 CACHE_REFRESH_SECONDS = 1800
 SHORT_LIMIT = 15
-REQUEST_TIMEOUT = 10  # Жёсткий timeout для всех запросов
+REQUEST_TIMEOUT = 10
 CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache_snapshot.json")
-
+ 
 _cache_lock = Lock()
 _analyzer = SmartAnalyzer()
-
+ 
 cached_data: dict = {
     "short": "⏳ Загружаю данные, подождите немного...",
     "full": "⏳ Загружаю данные, подождите немного...",
@@ -54,7 +56,7 @@ cached_data: dict = {
     "error": None,
     "from_saved": False,
 }
-
+ 
 _last_good: dict = {
     "items": [],
     "short": "",
@@ -63,13 +65,16 @@ _last_good: dict = {
     "last_upd": "—",
     "last_upd_ts": 0,
 }
-
+ 
+ 
 def _esc(text: str) -> str:
     return html.escape(text or "")
-
+ 
+ 
 def _blockquote(body: str) -> str:
     return f"<blockquote expandable>{body}</blockquote>"
-
+ 
+ 
 def _normalize_href(href: str, base_url: str) -> str:
     href = href.strip()
     if href.startswith("//"):
@@ -77,72 +82,110 @@ def _normalize_href(href: str, base_url: str) -> str:
     if href.startswith("/"):
         return urljoin(base_url, href)
     return href
-
-def _parse_links_from_page(url: str) -> list[tuple[str, str]]:
+ 
+ 
+def _get_pages_from_sitemap(sitemap_url: str) -> list[str]:
+    """Получает список URL страниц из XML sitemap."""
+    try:
+        resp = requests.get(sitemap_url, headers=HEADERS, proxies=NO_PROXIES, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "xml")
+        urls = [loc.get_text(strip=True) for loc in soup.find_all("loc")]
+        logger.info("Sitemap %s: найдено %d страниц", sitemap_url, len(urls))
+        return urls
+    except Exception as exc:
+        logger.error("Ошибка чтения sitemap %s: %s", sitemap_url, exc)
+        return []
+ 
+ 
+def _parse_links_from_page(page_url: str) -> list[tuple[str, str]]:
     """
-    Парсит ссылки со страницы с жёстким timeout=10 секунд.
-    Если сайт не отвечает за 10 секунд - выбросит исключение.
+    Парсит PDF/orar ссылки с одной страницы сайта.
     """
-    resp = requests.get(url, headers=HEADERS, proxies=NO_PROXIES, timeout=REQUEST_TIMEOUT)
+    resp = requests.get(page_url, headers=HEADERS, proxies=NO_PROXIES, timeout=REQUEST_TIMEOUT)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
-
-    # ВРЕМЕННЫЙ ЛОГ - удалить после отладки
+ 
     all_links = soup.find_all("a", href=True)
-    logger.info("URL: %s | Всего <a>: %d | HTML длина: %d", url, len(all_links), len(resp.text))
-    for link in all_links[:20]:
-        logger.info("  LINK: %s | TEXT: %s", link.get("href", ""), link.get_text(strip=True)[:40])
-
+    logger.info("Страница %s: <a> тегов: %d | HTML: %d байт", page_url, len(all_links), len(resp.text))
+ 
     items: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for link in soup.find_all("a", href=True):
-        href = _normalize_href(link.get("href", ""), url)
+ 
+    for link in all_links:
+        href = _normalize_href(link.get("href", ""), page_url)
         text = link.get_text(strip=True) or ""
         if not href or len(text) < 3:
             continue
         lower = href.lower()
-        if any(x in lower for x in ["orar", ".pdf", "docs.google", "spreadsheets"]):
+        if any(x in lower for x in ["orar", ".pdf", "docs.google", "spreadsheets", "wp-content/uploads"]):
             if href not in seen:
                 seen.add(href)
                 items.append((text[:80], href))
+                logger.info("  НАЙДЕНО: %s | %s", text[:50], href)
+ 
     return items
-
+ 
+ 
 def fetch_all_items() -> tuple[list[tuple[str, str]], Optional[str]]:
     """
-    Попытается загрузить ссылки со всех сайтов.
-    Если сайт не отвечает за REQUEST_TIMEOUT секунд - переходит к следующему.
-    Если ничего не загрузилось - отдаёт ошибку.
+    Собирает все ссылки на расписание через sitemap WordPress.
+    1. Читает sitemap → получает список страниц
+    2. Фильтрует страницы с 'orar' в URL
+    3. Парсит каждую страницу на PDF/ссылки
     """
     all_items: list[tuple[str, str]] = []
     seen: set[str] = set()
     errors: list[str] = []
-    for url in URLS:
+ 
+    # Собираем все страницы из всех sitemap
+    all_page_urls: list[str] = []
+    for sitemap_url in SITEMAP_URLS:
+        pages = _get_pages_from_sitemap(sitemap_url)
+        all_page_urls.extend(pages)
+ 
+    if not all_page_urls:
+        return [], "Не удалось получить sitemap"
+ 
+    # Фильтруем только страницы с orar
+    orar_pages = [u for u in all_page_urls if "orar" in u.lower()]
+    logger.info("Страниц с 'orar' в URL: %d", len(orar_pages))
+ 
+    # Если нет страниц с orar — пробуем все страницы (на случай другой структуры)
+    if not orar_pages:
+        logger.warning("Страниц с 'orar' не найдено, пробуем все %d страниц", len(all_page_urls))
+        orar_pages = all_page_urls
+ 
+    for page_url in orar_pages:
         try:
-            page_items = _parse_links_from_page(url)
+            page_items = _parse_links_from_page(page_url)
             for text, href in page_items:
                 if href not in seen:
                     seen.add(href)
                     all_items.append((text, href))
         except requests.Timeout:
-            logger.error("Timeout при парсинге %s (>%d сек)", url, REQUEST_TIMEOUT)
-            errors.append(f"{url}: timeout (>{REQUEST_TIMEOUT}s)")
+            logger.error("Timeout при парсинге %s (>%d сек)", page_url, REQUEST_TIMEOUT)
+            errors.append(f"{page_url}: timeout")
         except requests.ConnectionError as exc:
-            logger.error("Ошибка соединения %s: %s", url, exc)
-            errors.append(f"{url}: connection error")
+            logger.error("Ошибка соединения %s: %s", page_url, exc)
+            errors.append(f"{page_url}: connection error")
         except Exception as exc:
-            logger.error("Ошибка парсинга %s: %s", url, exc)
-            errors.append(f"{url}: {exc}")
+            logger.error("Ошибка парсинга %s: %s", page_url, exc)
+            errors.append(f"{page_url}: {exc}")
+ 
     if not all_items and errors:
         return [], "; ".join(errors)
     return all_items, "; ".join(errors) if errors else None
-
+ 
+ 
 def _format_short(items: list[tuple[str, str]]) -> str:
     if not items:
         body = _esc("Расписание не найдено. Сайт: https://fmi.usm.md/orar/")
         return f"<b>📍 Краткое расписание</b>\n\n{_blockquote(body)}"
     content = "\n".join(f"• {_esc(t)}\n  {_esc(h)}" for t, h in items[:SHORT_LIMIT])
     return f"<b>📍 Краткое расписание</b>\n\n{_blockquote(content)}"
-
+ 
+ 
 def _format_full(items: list[tuple[str, str]]) -> str:
     if not items:
         body = _esc("Расписание не найдено. https://fmi.usm.md/orar/")
@@ -151,7 +194,8 @@ def _format_full(items: list[tuple[str, str]]) -> str:
     if len(content) > 3800:
         content = content[:3800] + "\n...(обрезано)"
     return f"<b>📚 Полный список ссылок</b>\n\n{_blockquote(content)}"
-
+ 
+ 
 def _apply_success(items: list[tuple[str, str]], error: Optional[str]) -> None:
     now_str = time.strftime("%H:%M:%S")
     short = _format_short(items)
@@ -172,7 +216,8 @@ def _apply_success(items: list[tuple[str, str]], error: Optional[str]) -> None:
     _last_good["last_upd"] = now_str
     _last_good["last_upd_ts"] = cached_data["last_upd_ts"]
     _save_disk_cache()
-
+ 
+ 
 def _restore_from_saved() -> bool:
     if not _last_good.get("items"):
         return False
@@ -184,7 +229,8 @@ def _restore_from_saved() -> bool:
     cached_data["last_upd_ts"] = _last_good["last_upd_ts"]
     cached_data["from_saved"] = True
     return True
-
+ 
+ 
 def _save_disk_cache() -> None:
     try:
         payload = {
@@ -199,7 +245,8 @@ def _save_disk_cache() -> None:
             json.dump(payload, f, ensure_ascii=False)
     except Exception as exc:
         logger.warning("Не удалось сохранить cache_snapshot.json: %s", exc)
-
+ 
+ 
 def _load_disk_cache() -> None:
     if not os.path.isfile(CACHE_FILE):
         return
@@ -216,7 +263,8 @@ def _load_disk_cache() -> None:
             )
     except Exception as exc:
         logger.warning("Не удалось прочитать cache_snapshot.json: %s", exc)
-
+ 
+ 
 def update_cache() -> bool:
     items, error = fetch_all_items()
     if not items:
@@ -231,7 +279,8 @@ def update_cache() -> bool:
     _apply_success(items, error)
     logger.info("Кэш обновлён в %s (%d ссылок)", cached_data["last_upd"], len(items))
     return True
-
+ 
+ 
 def refresh_on_request() -> str:
     with _cache_lock:
         ok = update_cache()
@@ -244,19 +293,19 @@ def refresh_on_request() -> str:
                 f"Показано сохранённое от {cached_data['last_upd']}."
             )
         return "❌ Нет сохранённых данных. Попробуйте позже."
-
+ 
+ 
 def update_cache_loop() -> None:
     """
-    Главный цикл обновления кэша. Обёрнут в try-except, чтобы 
-    бот не падал при критических ошибках парсинга.
+    Главный цикл обновления кэша.
     """
     _load_disk_cache()
-    
+ 
     try:
         update_cache()
     except Exception as exc:
         logger.exception("Критическая ошибка при инициализации кэша: %s", exc)
-    
+ 
     while True:
         time.sleep(CACHE_REFRESH_SECONDS)
         try:
@@ -264,20 +313,23 @@ def update_cache_loop() -> None:
                 update_cache()
         except Exception as exc:
             logger.exception("Критическая ошибка в цикле обновления кэша: %s", exc)
-            # Продолжаем работу, перейдём к следующему циклу
-
+ 
+ 
 def get_raspisanie_text() -> tuple[str, str]:
     footer = refresh_on_request()
     return cached_data["short"], footer
-
+ 
+ 
 def get_orar_text() -> tuple[str, str]:
     footer = refresh_on_request()
     return cached_data["full"], footer
-
+ 
+ 
 def get_smart_report() -> str:
     analysis = cached_data.get("analysis") or {}
     return _analyzer.format_report(analysis, cached_data.get("last_upd", "—"))
-
+ 
+ 
 def get_status_text() -> str:
     ts = cached_data.get("last_upd_ts", 0)
     age_min = int((time.time() - ts) / 60) if ts else None
@@ -299,3 +351,4 @@ def get_status_text() -> str:
     if cached_data.get("from_saved"):
         lines.append("\n📦 Сейчас показаны сохранённые данные")
     return "\n".join(lines)
+ 
